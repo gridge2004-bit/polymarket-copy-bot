@@ -22,7 +22,7 @@ MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '1.0'))
 MIN_BET_USDC     = float(os.getenv('MIN_BET_USDC', '0.50'))
 POLL_INTERVAL    = int(os.getenv('POLL_INTERVAL', '5'))
 DRY_RUN          = os.getenv('DRY_RUN', 'true').lower() != 'false'
-DATA_API         = f"https://data-api.polymarket.com/trades?user={COPY_WALLET}&limit=20"
+DATA_API         = f"https://data-api.polymarket.com/activity?user={COPY_WALLET}&limit=20"
 
 # ── logging ───────────────────────────────────────────────
 logging.basicConfig(
@@ -351,7 +351,9 @@ def poll(client=None):
         key = t.get('transactionHash') or f"{t['timestamp']}_{t['asset']}"
         if key not in seen_hashes:
             seen_hashes.add(key)
-            new_trades.append(t)
+            # Only act on actual trades, not redemptions/settlements
+            if t.get('type', 'TRADE') == 'TRADE' and t.get('side'):
+                new_trades.append(t)
 
     if not new_trades:
         return
