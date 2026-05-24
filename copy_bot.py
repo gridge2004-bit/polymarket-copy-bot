@@ -8,7 +8,7 @@
 ════════════════════════════════════════════════════════════
 """
 
-import os, time, json, logging, urllib.request, urllib.error
+import os, re, time, json, logging, urllib.request, urllib.error
 from dotenv import load_dotenv
 
 # ── load config ──────────────────────────────────────────
@@ -16,9 +16,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
 CLOB_KEY_ID      = os.getenv('CLOB_API_KEY', '')      # Your Polymarket US Key ID
 CLOB_SECRET_KEY  = os.getenv('CLOB_SECRET', '')        # Your Polymarket US Secret Key
-COPY_WALLET      = "0x9495425feeb0c250accb89275c97587011b19a27"  # LaBradfordSmith22
+COPY_WALLET      = os.getenv('COPY_WALLET', '0x9495425feeb0c250accb89275c97587011b19a27')
 SCALE_FACTOR     = float(os.getenv('SCALE_FACTOR', '0.003'))
-MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '3.0'))
+MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '1.0'))
 MIN_BET_USDC     = float(os.getenv('MIN_BET_USDC', '0.50'))
 POLL_INTERVAL    = int(os.getenv('POLL_INTERVAL', '5'))
 DRY_RUN          = os.getenv('DRY_RUN', 'true').lower() != 'false'
@@ -38,9 +38,21 @@ log = logging.getLogger(__name__)
 
 # ── state ─────────────────────────────────────────────────
 seen_hashes  = set()
-slug_cache   = {}   # token_id → Polymarket US market slug
+slug_cache   = {}   # token_id → Polymarket US market slug (or '__NOT_FOUND__')
 total_trades = 0
 total_spent  = 0.0
+
+# ── stop-words for keyword extraction ────────────────────
+_STOP = {
+    'will', 'the', 'a', 'an', 'at', 'in', 'on', 'to', 'for', 'of', 'by',
+    'vs', 'or', 'and', 'be', 'is', 'are', 'was', 'were', 'have', 'has',
+    'had', 'do', 'does', 'did', 'not', 'win', 'lose', 'beat', 'over',
+    'under', 'more', 'less', 'than', 'score', 'game', 'match', 'play',
+    'first', 'last', 'next', 'this', 'that', 'which', 'who', 'what',
+    'when', 'where', 'how', 'if', 'with', 'from', 'its', 'their', 'his',
+    'her', 'our', 'get', 'make', 'take', 'come', 'go', 'see', 'know',
+    'think', 'look', 'want', 'give', 'use', 'find', 'tell', 'ask',
+}
 
 
 # ── helpers ───────────────────────────────────────────────
@@ -59,30 +71,153 @@ def scale_bet(their_size_usdc: float) -> float:
     return round(min(MAX_BET_USDC, max(MIN_BET_USDC, raw)), 2)
 
 
+def extract_proper_nouns(title: str) -> list:
+    """
+    Extract likely proper nouns (team names, player names, event names).
+    These are capitalized words that aren't at the start of the sentence
+    and aren't common articles/prepositions.
+    """
+    words = title.split()
+    nouns = []
+    for i, w in enumerate(words):
+        clean = w.strip('.,!?;:()')
+        if len(clean) > 2 and clean[0].isupper() and clean.lower() not in _STOP:
+            nouns.append(clean)
+    return nouns
+
+
+def extract_keywords(title: str) -> list:
+    """
+    Extract meaningful search keywords from a market title.
+    Returns proper nouns first (team names, etc.), then other significant words.
+    """
+    proper = extract_proper_nouns(title)
+
+    cleaned = re.sub(r"[^\w\s]", " ", title.lower())
+    all_words = [w for w in cleaned.split()
+                 if len(w) > 2 and w not in _STOP]
+
+    proper_lower = {p.lower() for p in proper}
+    extra = [w for w in all_words if w not in proper_lower]
+
+    combined = proper + extra
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for w in combined:
+        if w.lower() not in seen:
+            seen.add(w.lower())
+            unique.append(w)
+    return unique[:10]
+
+
+def title_similarity(a: str, b: str) -> float:
+    """
+    Word-overlap similarity between two titles.
+    Returns 0.0–1.0 (fraction of shorter title's words found in the other).
+    """
+    words_a = set(re.sub(r"[^\w\s]", " ", a.lower()).split())
+    words_b = set(re.sub(r"[^\w\s]", " ", b.lower()).split())
+    if not words_a or not words_b:
+        return 0.0
+    # Remove very short/common words for scoring
+    words_a = {w for w in words_a if len(w) > 2 and w not in _STOP}
+    words_b = {w for w in words_b if len(w) > 2 and w not in _STOP}
+    if not words_a or not words_b:
+        return 0.0
+    overlap = words_a & words_b
+    return len(overlap) / min(len(words_a), len(words_b))
+
+
 def get_market_slug(token_id: str, title: str, client) -> str | None:
     """
-    Map an international Polymarket token_id to a Polymarket US market slug.
-    Uses title search with caching to minimize API calls.
+    Map an international Polymarket token to a Polymarket US market slug.
+
+    Strategy:
+      1. Extract proper nouns + keywords from the trade title
+      2. Try multiple search queries (pairs/triples of top keywords)
+      3. Score every result by title similarity
+      4. Return the best match above a threshold
+      5. Cache hits AND misses to avoid hammering the API
     """
     if token_id in slug_cache:
-        return slug_cache[token_id]
+        cached = slug_cache[token_id]
+        return None if cached == '__NOT_FOUND__' else cached
 
-    try:
-        # Search using first 6 words of the market title
-        query = ' '.join(title.split()[:6])
-        results = client.search.query({"query": query, "limit": 5})
-        markets = results.get('markets', [])
+    keywords = extract_keywords(title)
+    log.info(f"  🔑 Keywords extracted: {keywords[:6]}")
 
-        if markets:
-            slug = markets[0].get('slug')
-            if slug:
-                slug_cache[token_id] = slug
-                log.info(f"  🔍 Mapped to US market: {slug}")
-                return slug
-        log.warning(f"  ⚠ No US market found for: '{title[:50]}'")
-    except Exception as e:
-        log.warning(f"  ⚠ Market search failed for '{title[:40]}': {e}")
+    # Build a ranked list of search queries to try
+    search_queries = []
 
+    # Best: top 2 proper nouns (usually team names)
+    if len(keywords) >= 2:
+        search_queries.append(' '.join(keywords[:2]))
+    # Also try top 3 keywords
+    if len(keywords) >= 3:
+        search_queries.append(' '.join(keywords[:3]))
+    # Try keywords 2-4 (skip the first, which might be a league prefix like "MLB")
+    if len(keywords) >= 4:
+        search_queries.append(' '.join(keywords[1:4]))
+    # Fallback: raw first 4 words of title (includes context words)
+    raw = title.split()
+    if len(raw) >= 3:
+        search_queries.append(' '.join(raw[:4]))
+    # Last resort: just first keyword alone
+    if keywords:
+        search_queries.append(keywords[0])
+
+    # Deduplicate queries while preserving order
+    seen_q = set()
+    unique_queries = []
+    for q in search_queries:
+        if q not in seen_q:
+            seen_q.add(q)
+            unique_queries.append(q)
+
+    best_slug  = None
+    best_score = 0.0
+    best_title = ''
+    THRESHOLD  = 0.30   # At least 30% keyword overlap required
+
+    for query in unique_queries:
+        try:
+            results = client.search.query({"query": query, "limit": 8})
+            markets = results.get('markets', []) if isinstance(results, dict) else []
+
+            for m in markets:
+                m_title = (m.get('title') or m.get('name') or
+                           m.get('question') or m.get('slug', ''))
+                score = title_similarity(title, m_title)
+                log.debug(f"    [{query}] → '{m_title[:45]}' score={score:.2f}")
+
+                if score > best_score:
+                    best_score = score
+                    best_slug  = m.get('slug')
+                    best_title = m_title
+
+                # Short-circuit if we find a great match (≥60% overlap)
+                if score >= 0.60:
+                    break
+
+        except Exception as e:
+            log.warning(f"  ⚠ Search '{query}' failed: {e}")
+            continue
+
+        if best_score >= 0.60:
+            break  # No need to try more queries
+
+    if best_slug and best_score >= THRESHOLD:
+        slug_cache[token_id] = best_slug
+        log.info(f"  🔍 Matched US market: '{best_title[:50]}' → {best_slug} (score={best_score:.2f})")
+        return best_slug
+
+    # Cache the miss so we don't hammer the API for the same market
+    slug_cache[token_id] = '__NOT_FOUND__'
+    log.warning(
+        f"  ⚠ No US market found for: '{title[:50]}' "
+        f"(best_score={best_score:.2f}, best_candidate='{best_title[:40]}')"
+    )
     return None
 
 
@@ -114,7 +249,7 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
     token_id = trade['asset']
     side     = trade['side']
     outcome  = trade.get('outcome', 'YES')
-    title    = trade.get('title', '?')[:55]
+    title    = trade.get('title', '?')[:65]
     price    = float(trade.get('price', 0.5))
 
     log.info(f"  {'[DRY RUN] ' if DRY_RUN else ''}→ {side} {outcome} @ {price:.3f} | ${bet_usdc} | {title}")
@@ -130,15 +265,15 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
         log.error("❌ No Polymarket US client — cannot execute")
         return
 
-    # Find the US market slug from the title
+    # Find the US market slug using smart fuzzy matching
     slug = get_market_slug(token_id, title, client)
     if not slug:
-        log.warning(f"  ✗ Skipping — no matching US market found")
+        log.warning(f"  ✗ Skipping — no matching US market found for '{title[:40]}'")
         return
 
     # Calculate share quantity from USD amount
     # quantity (shares) = bet_usdc / price_per_share
-    safe_price = max(price, 0.01)  # avoid divide by zero
+    safe_price = max(price, 0.01)   # avoid divide by zero
     quantity   = round(bet_usdc / safe_price, 4)
     intent     = map_intent(side, outcome)
 
@@ -151,7 +286,7 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
             "type": "ORDER_TYPE_LIMIT",
             "price": {"value": str(round(price, 4)), "currency": "USD"},
             "quantity": quantity,
-            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",  # IOC = fast execution
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
         })
 
         total_trades += 1
@@ -163,8 +298,8 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
         )
 
     except NotFoundError:
-        log.warning(f"  ✗ Market '{slug}' not found on Polymarket US — possibly different name")
-        # Clear cache so next attempt re-searches
+        log.warning(f"  ✗ Market '{slug}' not found on Polymarket US (may differ by slug)")
+        # Clear cache so a future trade on the same market can retry
         slug_cache.pop(token_id, None)
     except BadRequestError as e:
         log.error(f"  ✗ Bad order parameters: {e}")
@@ -175,7 +310,7 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
 
 
 def poll(client=None):
-    """Fetch latest trades from LaBradfordSmith22, mirror new ones."""
+    """Fetch latest trades from target wallet, mirror new ones."""
     try:
         trades = fetch_json(DATA_API)
     except Exception as e:
@@ -192,7 +327,7 @@ def poll(client=None):
     if not new_trades:
         return
 
-    for t in reversed(new_trades):  # oldest new trade first
+    for t in reversed(new_trades):   # oldest new trade first
         their_size = float(t.get('usdcSize') or t.get('size') or 0)
         bet        = scale_bet(their_size)
         ago        = int(time.time() - t['timestamp'])
@@ -229,7 +364,7 @@ def build_client():
 def main():
     log.info("════════════════════════════════════════════")
     log.info("  POLYMARKET COPY BOT — POLYMARKET US EDITION")
-    log.info(f"  Target : LaBradfordSmith22")
+    log.info(f"  Target : {COPY_WALLET[:10]}... (LaBradfordSmith22)")
     log.info(f"  Scale  : {SCALE_FACTOR*100:.1f}% of their size (max ${MAX_BET_USDC}, min ${MIN_BET_USDC})")
     log.info(f"  Poll   : every {POLL_INTERVAL}s")
     log.info(f"  Mode   : {'🔴 DRY RUN (no real orders)' if DRY_RUN else '🟢 LIVE — REAL ORDERS ENABLED'}")
