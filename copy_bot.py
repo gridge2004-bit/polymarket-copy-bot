@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
 """
 ════════════════════════════════════════════════════════════
-  POLYMARKET COPY BOT — mirrors LaBradfordSmith22 in real time
-  Target:     0x9495425feeb0c250accb89275c97587011b19a27
-  Scaling:    proportional to their size (capped at MAX_BET_USDC)
-  Mode:       set DRY_RUN=false in .env to go live
+  POLYMARKET COPY BOT — Polymarket US Edition
+  Watches:  LaBradfordSmith22 (international Polymarket)
+  Executes: Your Polymarket US account (keyId + secretKey)
+  No private key needed — CLOB_API_KEY + CLOB_SECRET is enough
 ════════════════════════════════════════════════════════════
 """
 
 import os, time, json, logging, urllib.request, urllib.error
-from datetime import datetime
 from dotenv import load_dotenv
 
 # ── load config ──────────────────────────────────────────
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
-PRIVATE_KEY      = os.getenv('PRIVATE_KEY', '')          # Privy/wallet signing key (needed to go live)
-CLOB_API_KEY     = os.getenv('CLOB_API_KEY', '')         # From Polymarket Settings → Trading API
-CLOB_SECRET      = os.getenv('CLOB_SECRET', '')          # From Polymarket Settings → Trading API
-CLOB_PASSPHRASE  = os.getenv('CLOB_PASSPHRASE', '')      # Leave blank if not shown
-FUNDER_WALLET    = os.getenv('FUNDER_WALLET', '')        # Your Polymarket wallet address (for email-wallet users)
+CLOB_KEY_ID      = os.getenv('CLOB_API_KEY', '')      # Your Polymarket US Key ID
+CLOB_SECRET_KEY  = os.getenv('CLOB_SECRET', '')        # Your Polymarket US Secret Key
 COPY_WALLET      = "0x9495425feeb0c250accb89275c97587011b19a27"  # LaBradfordSmith22
-SCALE_FACTOR     = float(os.getenv('SCALE_FACTOR', '0.003'))     # 0.3% of their trade size
-MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '3.0'))       # hard cap per trade
-MIN_BET_USDC     = float(os.getenv('MIN_BET_USDC', '0.50'))      # ignore tiny scaled bets
-POLL_INTERVAL    = int(os.getenv('POLL_INTERVAL', '5'))           # seconds between polls
+SCALE_FACTOR     = float(os.getenv('SCALE_FACTOR', '0.003'))
+MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '3.0'))
+MIN_BET_USDC     = float(os.getenv('MIN_BET_USDC', '0.50'))
+POLL_INTERVAL    = int(os.getenv('POLL_INTERVAL', '5'))
 DRY_RUN          = os.getenv('DRY_RUN', 'true').lower() != 'false'
-CLOB_HOST        = "https://clob.polymarket.com"
 DATA_API         = f"https://data-api.polymarket.com/trades?user={COPY_WALLET}&limit=20"
 
 # ── logging ───────────────────────────────────────────────
@@ -43,8 +38,10 @@ log = logging.getLogger(__name__)
 
 # ── state ─────────────────────────────────────────────────
 seen_hashes  = set()
+slug_cache   = {}   # token_id → Polymarket US market slug
 total_trades = 0
 total_spent  = 0.0
+
 
 # ── helpers ───────────────────────────────────────────────
 def fetch_json(url):
@@ -58,115 +55,127 @@ def fetch_json(url):
 
 
 def scale_bet(their_size_usdc: float) -> float:
-    """Scale their trade size to our bet, respecting min/max."""
     raw = their_size_usdc * SCALE_FACTOR
     return round(min(MAX_BET_USDC, max(MIN_BET_USDC, raw)), 2)
 
 
-def get_best_price(token_id: str, side: str) -> float | None:
-    """Fetch best ask (BUY) or best bid (SELL) from Polymarket CLOB order book."""
+def get_market_slug(token_id: str, title: str, client) -> str | None:
+    """
+    Map an international Polymarket token_id to a Polymarket US market slug.
+    Uses title search with caching to minimize API calls.
+    """
+    if token_id in slug_cache:
+        return slug_cache[token_id]
+
     try:
-        data = fetch_json(f"{CLOB_HOST}/book?token_id={token_id}")
-        if side == 'BUY':
-            asks = data.get('asks', [])
-            if asks:
-                return float(sorted(asks, key=lambda x: float(x['price']))[0]['price'])
-        else:
-            bids = data.get('bids', [])
-            if bids:
-                return float(sorted(bids, key=lambda x: float(x['price']), reverse=True)[0]['price'])
+        # Search using first 6 words of the market title
+        query = ' '.join(title.split()[:6])
+        results = client.search.query({"query": query, "limit": 5})
+        markets = results.get('markets', [])
+
+        if markets:
+            slug = markets[0].get('slug')
+            if slug:
+                slug_cache[token_id] = slug
+                log.info(f"  🔍 Mapped to US market: {slug}")
+                return slug
+        log.warning(f"  ⚠ No US market found for: '{title[:50]}'")
     except Exception as e:
-        log.warning(f"Book fetch failed for {token_id[:16]}...: {e}")
+        log.warning(f"  ⚠ Market search failed for '{title[:40]}': {e}")
+
     return None
 
 
-def execute_trade(trade: dict, bet_usdc: float):
-    """Execute a mirrored trade via Polymarket CLOB API."""
+def map_intent(side: str, outcome: str) -> str:
+    """
+    Map international Polymarket side + outcome to Polymarket US order intent.
+    BUY YES  → ORDER_INTENT_BUY_LONG   (buy YES shares)
+    BUY NO   → ORDER_INTENT_BUY_SHORT  (buy NO = short YES)
+    SELL YES → ORDER_INTENT_SELL_LONG  (sell/close YES position)
+    SELL NO  → ORDER_INTENT_SELL_SHORT (sell NO shares)
+    """
+    out = outcome.upper().strip()
+    is_yes = out in ('YES', '1', 'LONG', 'TRUE')
+
+    if side == 'BUY' and is_yes:
+        return 'ORDER_INTENT_BUY_LONG'
+    elif side == 'BUY' and not is_yes:
+        return 'ORDER_INTENT_BUY_SHORT'
+    elif side == 'SELL' and is_yes:
+        return 'ORDER_INTENT_SELL_LONG'
+    else:
+        return 'ORDER_INTENT_SELL_SHORT'
+
+
+def execute_trade(trade: dict, bet_usdc: float, client=None):
+    """Mirror a trade on Polymarket US."""
     global total_trades, total_spent
 
-    token_id  = trade['asset']
-    side      = trade['side']       # 'BUY' or 'SELL'
-    outcome   = trade.get('outcome', '?')
-    title     = trade.get('title', '?')[:55]
-    their_p   = trade.get('price', 0)
+    token_id = trade['asset']
+    side     = trade['side']
+    outcome  = trade.get('outcome', 'YES')
+    title    = trade.get('title', '?')[:55]
+    price    = float(trade.get('price', 0.5))
 
-    # Get current live price
-    live_price = get_best_price(token_id, side)
-    if live_price is None:
-        log.warning(f"  ✗ Could not fetch live price — skipping")
-        return
-
-    # Warn if price has moved significantly since their trade
-    price_drift = abs(live_price - their_p)
-    if price_drift > 0.10:
-        log.warning(f"  ⚠ Price drifted {price_drift:.2f} since their trade ({their_p:.2f} → {live_price:.2f}) — still executing")
-
-    log.info(f"  {'[DRY RUN] ' if DRY_RUN else ''}→ {side} {outcome} @ {live_price:.3f} | size ${bet_usdc} | {title}")
+    log.info(f"  {'[DRY RUN] ' if DRY_RUN else ''}→ {side} {outcome} @ {price:.3f} | ${bet_usdc} | {title}")
 
     if DRY_RUN:
         total_trades += 1
         total_spent  += bet_usdc
-        log.info(f"  ✓ DRY RUN logged. Total simulated: {total_trades} trades, ${total_spent:.2f} spent")
+        log.info(f"  ✓ DRY RUN logged. Total: {total_trades} trades, ${total_spent:.2f} simulated")
         return
 
-    # ── LIVE EXECUTION ────────────────────────────────────
+    # ── LIVE EXECUTION ─────────────────────────────────────
+    if not client:
+        log.error("❌ No Polymarket US client — cannot execute")
+        return
+
+    # Find the US market slug from the title
+    slug = get_market_slug(token_id, title, client)
+    if not slug:
+        log.warning(f"  ✗ Skipping — no matching US market found")
+        return
+
+    # Calculate share quantity from USD amount
+    # quantity (shares) = bet_usdc / price_per_share
+    safe_price = max(price, 0.01)  # avoid divide by zero
+    quantity   = round(bet_usdc / safe_price, 4)
+    intent     = map_intent(side, outcome)
+
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY, SELL
+        from polymarket_us import NotFoundError, BadRequestError, AuthenticationError
 
-        if not PRIVATE_KEY:
-            log.error("❌ PRIVATE_KEY not set — cannot sign orders. Export your Privy key from Polymarket → Settings → Export Wallet, then add PRIVATE_KEY to Railway Variables.")
-            return
+        order = client.orders.create({
+            "marketSlug": slug,
+            "intent": intent,
+            "type": "ORDER_TYPE_LIMIT",
+            "price": {"value": str(round(price, 4)), "currency": "USD"},
+            "quantity": quantity,
+            "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",  # IOC = fast execution
+        })
 
-        # Build client — use signature_type=1 + funder if email-wallet user
-        sig_type = 1 if FUNDER_WALLET else 0
-        client = ClobClient(
-            host=CLOB_HOST,
-            key=PRIVATE_KEY,
-            chain_id=137,
-            signature_type=sig_type,
-            funder=FUNDER_WALLET or None,
+        total_trades += 1
+        total_spent  += bet_usdc
+        log.info(
+            f"  ✅ ORDER PLACED — {slug} | {intent} | "
+            f"qty={quantity} shares @ ${price:.3f} | ${bet_usdc} | "
+            f"id={order.get('orderId', order.get('id', '?'))}"
         )
 
-        # Use pre-set API credentials if available (from Polymarket Settings → Trading API)
-        # Otherwise derive them automatically from the private key
-        if CLOB_API_KEY and CLOB_SECRET:
-            from py_clob_client.clob_types import ApiCreds
-            client.set_api_creds(ApiCreds(
-                api_key=CLOB_API_KEY,
-                api_secret=CLOB_SECRET,
-                api_passphrase=CLOB_PASSPHRASE,  # empty string is fine
-            ))
-            log.info("  🔑 Using pre-set API credentials (CLOB_API_KEY/CLOB_SECRET)")
-        else:
-            client.set_api_creds(client.create_or_derive_api_creds())
-            log.info("  🔑 Derived API credentials from PRIVATE_KEY")
-
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=live_price,
-            size=bet_usdc,
-            side=BUY if side == 'BUY' else SELL,
-        )
-        signed = client.create_order(order_args)
-        resp   = client.post_order(signed, OrderType.FOK)   # Fill or Kill
-
-        if resp and resp.get('success'):
-            total_trades += 1
-            total_spent  += bet_usdc
-            log.info(f"  ✅ ORDER FILLED — {side} {outcome} @ {live_price:.3f} | ${bet_usdc} | order_id={resp.get('orderID','?')}")
-        else:
-            log.error(f"  ✗ Order rejected: {resp}")
-
-    except ImportError:
-        log.error("py-clob-client not installed. Run: pip install py-clob-client")
+    except NotFoundError:
+        log.warning(f"  ✗ Market '{slug}' not found on Polymarket US — possibly different name")
+        # Clear cache so next attempt re-searches
+        slug_cache.pop(token_id, None)
+    except BadRequestError as e:
+        log.error(f"  ✗ Bad order parameters: {e}")
+    except AuthenticationError as e:
+        log.error(f"  ✗ Auth failed — check CLOB_API_KEY and CLOB_SECRET: {e}")
     except Exception as e:
         log.error(f"  ✗ Execution error: {e}")
 
 
-def poll():
-    """Fetch latest trades, detect new ones, mirror them."""
+def poll(client=None):
+    """Fetch latest trades from LaBradfordSmith22, mirror new ones."""
     try:
         trades = fetch_json(DATA_API)
     except Exception as e:
@@ -183,8 +192,7 @@ def poll():
     if not new_trades:
         return
 
-    # Process newest-first, but they arrive newest-first already
-    for t in reversed(new_trades):   # oldest new trade first
+    for t in reversed(new_trades):  # oldest new trade first
         their_size = float(t.get('usdcSize') or t.get('size') or 0)
         bet        = scale_bet(their_size)
         ago        = int(time.time() - t['timestamp'])
@@ -199,48 +207,78 @@ def poll():
             log.warning("  ✗ Zero size trade — skipping")
             continue
 
-        execute_trade(t, bet)
-        time.sleep(0.3)   # small gap between rapid trades
+        execute_trade(t, bet, client)
+        time.sleep(0.3)
+
+
+def build_client():
+    """Create Polymarket US client if credentials are available."""
+    if not CLOB_KEY_ID or not CLOB_SECRET_KEY:
+        return None
+    try:
+        from polymarket_us import PolymarketUS
+        return PolymarketUS(key_id=CLOB_KEY_ID, secret_key=CLOB_SECRET_KEY)
+    except ImportError:
+        log.error("polymarket-us not installed. Run: pip install polymarket-us")
+        return None
+    except Exception as e:
+        log.error(f"Failed to create client: {e}")
+        return None
 
 
 def main():
     log.info("════════════════════════════════════════════")
-    log.info("  POLYMARKET COPY BOT — STARTING UP")
+    log.info("  POLYMARKET COPY BOT — POLYMARKET US EDITION")
     log.info(f"  Target : LaBradfordSmith22")
     log.info(f"  Scale  : {SCALE_FACTOR*100:.1f}% of their size (max ${MAX_BET_USDC}, min ${MIN_BET_USDC})")
     log.info(f"  Poll   : every {POLL_INTERVAL}s")
     log.info(f"  Mode   : {'🔴 DRY RUN (no real orders)' if DRY_RUN else '🟢 LIVE — REAL ORDERS ENABLED'}")
     log.info("────────────────────────────────────────────")
-    log.info(f"  Credentials status:")
-    log.info(f"    PRIVATE_KEY  : {'✅ set' if PRIVATE_KEY else '❌ NOT SET (required to go live)'}")
-    log.info(f"    CLOB_API_KEY : {'✅ set' if CLOB_API_KEY else '⚪ not set (will derive from key)'}")
-    log.info(f"    CLOB_SECRET  : {'✅ set' if CLOB_SECRET else '⚪ not set (will derive from key)'}")
-    log.info(f"    FUNDER_WALLET: {'✅ ' + FUNDER_WALLET[:10] + '...' if FUNDER_WALLET else '⚪ not set (EOA mode)'}")
+    log.info(f"  Credentials:")
+    log.info(f"    CLOB_API_KEY (key_id)   : {'✅ set' if CLOB_KEY_ID else '❌ NOT SET'}")
+    log.info(f"    CLOB_SECRET (secret_key): {'✅ set' if CLOB_SECRET_KEY else '❌ NOT SET'}")
     log.info("════════════════════════════════════════════")
 
-    if not DRY_RUN and not PRIVATE_KEY:
-        log.error("❌ DRY_RUN=false but PRIVATE_KEY is not set.")
-        log.error("   Export your wallet key: Polymarket → Profile → Settings → Export Wallet")
-        log.error("   Then add PRIVATE_KEY=0x... to Railway Variables and redeploy.")
+    if not DRY_RUN and (not CLOB_KEY_ID or not CLOB_SECRET_KEY):
+        log.error("❌ DRY_RUN=false but CLOB_API_KEY or CLOB_SECRET is missing.")
+        log.error("   Add them in Railway → Variables and redeploy.")
         return
 
-    # Pre-seed seen hashes with current trades so we don't replay history
+    # Build Polymarket US client
+    client = build_client() if not DRY_RUN else None
+    if not DRY_RUN and not client:
+        log.error("❌ Could not connect to Polymarket US — check credentials")
+        return
+
+    if client:
+        # Verify connectivity by fetching account
+        try:
+            balances = client.account.balances()
+            log.info(f"✅ Connected to Polymarket US — account verified")
+            log.info(f"   Balances: {balances}")
+        except Exception as e:
+            log.error(f"❌ Auth check failed: {e}")
+            return
+
+    # Seed history so we don't replay past trades
     log.info("Seeding history (ignoring past trades)...")
     try:
         existing = fetch_json(DATA_API)
         for t in existing:
             key = t.get('transactionHash') or f"{t['timestamp']}_{t['asset']}"
             seen_hashes.add(key)
-        log.info(f"✓ Seeded {len(seen_hashes)} existing trades — bot will only act on NEW trades from now")
+        log.info(f"✓ Seeded {len(seen_hashes)} existing trades — bot will only act on NEW trades")
     except Exception as e:
         log.warning(f"Could not seed history: {e}")
 
     log.info("Watching for new trades...\n")
     while True:
         try:
-            poll()
+            poll(client)
         except KeyboardInterrupt:
             log.info(f"\nBot stopped. Session: {total_trades} trades, ${total_spent:.2f} total")
+            if client:
+                client.close()
             break
         except Exception as e:
             log.error(f"Unexpected error in poll loop: {e}")
