@@ -1,3 +1,2 @@
-py-clob-client
+polymarket-us
 python-dotenv
-requests
