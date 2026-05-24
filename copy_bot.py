@@ -15,7 +15,11 @@ from dotenv import load_dotenv
 # ── load config ──────────────────────────────────────────
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
-PRIVATE_KEY      = os.getenv('PRIVATE_KEY', '')
+PRIVATE_KEY      = os.getenv('PRIVATE_KEY', '')          # Privy/wallet signing key (needed to go live)
+CLOB_API_KEY     = os.getenv('CLOB_API_KEY', '')         # From Polymarket Settings → Trading API
+CLOB_SECRET      = os.getenv('CLOB_SECRET', '')          # From Polymarket Settings → Trading API
+CLOB_PASSPHRASE  = os.getenv('CLOB_PASSPHRASE', '')      # Leave blank if not shown
+FUNDER_WALLET    = os.getenv('FUNDER_WALLET', '')        # Your Polymarket wallet address (for email-wallet users)
 COPY_WALLET      = "0x9495425feeb0c250accb89275c97587011b19a27"  # LaBradfordSmith22
 SCALE_FACTOR     = float(os.getenv('SCALE_FACTOR', '0.003'))     # 0.3% of their trade size
 MAX_BET_USDC     = float(os.getenv('MAX_BET_USDC', '3.0'))       # hard cap per trade
@@ -112,16 +116,32 @@ def execute_trade(trade: dict, bet_usdc: float):
         from py_clob_client.order_builder.constants import BUY, SELL
 
         if not PRIVATE_KEY:
-            log.error("PRIVATE_KEY not set in .env — cannot execute live trades")
+            log.error("❌ PRIVATE_KEY not set — cannot sign orders. Export your Privy key from Polymarket → Settings → Export Wallet, then add PRIVATE_KEY to Railway Variables.")
             return
 
+        # Build client — use signature_type=1 + funder if email-wallet user
+        sig_type = 1 if FUNDER_WALLET else 0
         client = ClobClient(
             host=CLOB_HOST,
             key=PRIVATE_KEY,
-            chain_id=137,       # Polygon mainnet
-            signature_type=0,   # EOA (standard for exported Privy key)
+            chain_id=137,
+            signature_type=sig_type,
+            funder=FUNDER_WALLET or None,
         )
-        client.set_api_creds(client.derive_api_key())
+
+        # Use pre-set API credentials if available (from Polymarket Settings → Trading API)
+        # Otherwise derive them automatically from the private key
+        if CLOB_API_KEY and CLOB_SECRET:
+            from py_clob_client.clob_types import ApiCreds
+            client.set_api_creds(ApiCreds(
+                api_key=CLOB_API_KEY,
+                api_secret=CLOB_SECRET,
+                api_passphrase=CLOB_PASSPHRASE,  # empty string is fine
+            ))
+            log.info("  🔑 Using pre-set API credentials (CLOB_API_KEY/CLOB_SECRET)")
+        else:
+            client.set_api_creds(client.create_or_derive_api_creds())
+            log.info("  🔑 Derived API credentials from PRIVATE_KEY")
 
         order_args = OrderArgs(
             token_id=token_id,
@@ -190,10 +210,18 @@ def main():
     log.info(f"  Scale  : {SCALE_FACTOR*100:.1f}% of their size (max ${MAX_BET_USDC}, min ${MIN_BET_USDC})")
     log.info(f"  Poll   : every {POLL_INTERVAL}s")
     log.info(f"  Mode   : {'🔴 DRY RUN (no real orders)' if DRY_RUN else '🟢 LIVE — REAL ORDERS ENABLED'}")
+    log.info("────────────────────────────────────────────")
+    log.info(f"  Credentials status:")
+    log.info(f"    PRIVATE_KEY  : {'✅ set' if PRIVATE_KEY else '❌ NOT SET (required to go live)'}")
+    log.info(f"    CLOB_API_KEY : {'✅ set' if CLOB_API_KEY else '⚪ not set (will derive from key)'}")
+    log.info(f"    CLOB_SECRET  : {'✅ set' if CLOB_SECRET else '⚪ not set (will derive from key)'}")
+    log.info(f"    FUNDER_WALLET: {'✅ ' + FUNDER_WALLET[:10] + '...' if FUNDER_WALLET else '⚪ not set (EOA mode)'}")
     log.info("════════════════════════════════════════════")
 
     if not DRY_RUN and not PRIVATE_KEY:
-        log.error("DRY_RUN=false but PRIVATE_KEY is not set. Add it to .env first.")
+        log.error("❌ DRY_RUN=false but PRIVATE_KEY is not set.")
+        log.error("   Export your wallet key: Polymarket → Profile → Settings → Export Wallet")
+        log.error("   Then add PRIVATE_KEY=0x... to Railway Variables and redeploy.")
         return
 
     # Pre-seed seen hashes with current trades so we don't replay history
