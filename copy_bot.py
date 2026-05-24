@@ -86,12 +86,32 @@ def extract_proper_nouns(title: str) -> list:
     return nouns
 
 
+def strip_market_type_prefix(title: str) -> str:
+    """
+    Remove spread/O/U prefixes so we can find the underlying game.
+    e.g. "Spread: Arizona Diamondbacks (-4.5)" → "Arizona Diamondbacks"
+         "Athletics vs. San Diego Padres: O/U 5.5" → "Athletics vs. San Diego Padres"
+         "MLB: Colorado Rockies vs. Arizona Diamondbacks" → "Colorado Rockies vs. Arizona Diamondbacks"
+    """
+    # Remove leading league prefix (MLB:, NBA:, NFL:, MLS:, etc.)
+    title = re.sub(r'^(MLB|NBA|NFL|NHL|MLS|Soccer|NFL|NCAAB|NCAAF):\s*', '', title, flags=re.IGNORECASE)
+    # Remove spread prefix
+    title = re.sub(r'^Spread:\s*', '', title, flags=re.IGNORECASE)
+    # Remove everything after O/U marker (": O/U 5.5")
+    title = re.sub(r':\s*O/U\s*[\d.]+.*$', '', title, flags=re.IGNORECASE)
+    # Remove point spread parenthetical e.g. "(-4.5)" or "(+3)"
+    title = re.sub(r'\s*\([+-]?[\d.]+\)', '', title)
+    return title.strip()
+
+
 def extract_keywords(title: str) -> list:
     """
     Extract meaningful search keywords from a market title.
     Returns proper nouns first (team names, etc.), then other significant words.
     """
-    proper = extract_proper_nouns(title)
+    # Work from the stripped title so spread/O/U prefixes don't pollute keywords
+    clean_title = strip_market_type_prefix(title)
+    proper = extract_proper_nouns(clean_title)
 
     cleaned = re.sub(r"[^\w\s]", " ", title.lower())
     all_words = [w for w in cleaned.split()
@@ -144,23 +164,31 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
         cached = slug_cache[token_id]
         return None if cached == '__NOT_FOUND__' else cached
 
+    # Strip spread/O/U prefix to get the underlying game title
+    base_title = strip_market_type_prefix(title)
+    if base_title != title:
+        log.info(f"  🧹 Stripped to base title: '{base_title[:55]}'")
+
     keywords = extract_keywords(title)
     log.info(f"  🔑 Keywords extracted: {keywords[:6]}")
 
     # Build a ranked list of search queries to try
     search_queries = []
 
-    # Best: top 2 proper nouns (usually team names)
+    # Best: top 2 proper nouns from the base title (usually team names)
     if len(keywords) >= 2:
         search_queries.append(' '.join(keywords[:2]))
     # Also try top 3 keywords
     if len(keywords) >= 3:
         search_queries.append(' '.join(keywords[:3]))
+    # If title was stripped, also try the stripped title directly
+    if base_title != title and len(base_title) > 5:
+        search_queries.append(base_title[:60])
     # Try keywords 2-4 (skip the first, which might be a league prefix like "MLB")
     if len(keywords) >= 4:
         search_queries.append(' '.join(keywords[1:4]))
-    # Fallback: raw first 4 words of title (includes context words)
-    raw = title.split()
+    # Fallback: raw first 4 words of base title
+    raw = base_title.split()
     if len(raw) >= 3:
         search_queries.append(' '.join(raw[:4]))
     # Last resort: just first keyword alone
@@ -188,7 +216,8 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
             for m in markets:
                 m_title = (m.get('title') or m.get('name') or
                            m.get('question') or m.get('slug', ''))
-                score = title_similarity(title, m_title)
+                # Score against base_title (stripped) for better matching
+                score = title_similarity(base_title, m_title)
                 log.debug(f"    [{query}] → '{m_title[:45]}' score={score:.2f}")
 
                 if score > best_score:
