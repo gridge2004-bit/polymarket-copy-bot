@@ -42,6 +42,143 @@ slug_cache   = {}   # token_id → Polymarket US market slug (or '__NOT_FOUND__'
 total_trades = 0
 total_spent  = 0.0
 
+# ── team nickname → city name lookup (for US market matching) ────────────────
+_TEAM_NAMES = {
+    # NBA
+    'thunder': 'oklahoma city', 'okc': 'oklahoma city',
+    'spurs': 'san antonio',
+    'lakers': 'los angeles', 'laker': 'los angeles',
+    'celtics': 'boston', 'celtic': 'boston',
+    'warriors': 'golden state',
+    'nets': 'brooklyn',
+    'knicks': 'new york', 'knick': 'new york',
+    'heat': 'miami',
+    'bulls': 'chicago',
+    'bucks': 'milwaukee',
+    'suns': 'phoenix',
+    'nuggets': 'denver',
+    'clippers': 'los angeles',
+    'sixers': 'philadelphia', '76ers': 'philadelphia',
+    'hawks': 'atlanta',
+    'hornets': 'charlotte',
+    'cavaliers': 'cleveland', 'cavs': 'cleveland',
+    'pistons': 'detroit',
+    'pacers': 'indiana',
+    'raptors': 'toronto',
+    'magic': 'orlando',
+    'wizards': 'washington',
+    'pelicans': 'new orleans',
+    'grizzlies': 'memphis',
+    'jazz': 'utah',
+    'timberwolves': 'minnesota', 'wolves': 'minnesota',
+    'trail blazers': 'portland', 'blazers': 'portland',
+    'kings': 'sacramento',
+    'rockets': 'houston',
+    'mavericks': 'dallas', 'mavs': 'dallas',
+    # NFL
+    'chiefs': 'kansas city',
+    'eagles': 'philadelphia',
+    'cowboys': 'dallas',
+    'patriots': 'new england',
+    'bills': 'buffalo',
+    'dolphins': 'miami',
+    'jets': 'new york',
+    'giants': 'new york',
+    'ravens': 'baltimore',
+    'steelers': 'pittsburgh',
+    'bengals': 'cincinnati',
+    'browns': 'cleveland',
+    'texans': 'houston',
+    'colts': 'indianapolis',
+    'jaguars': 'jacksonville',
+    'titans': 'tennessee',
+    'broncos': 'denver',
+    'raiders': 'las vegas',
+    'chargers': 'los angeles',
+    'rams': 'los angeles',
+    '49ers': 'san francisco',
+    'seahawks': 'seattle',
+    'cardinals': 'arizona',
+    'packers': 'green bay',
+    'bears': 'chicago',
+    'lions': 'detroit',
+    'vikings': 'minnesota',
+    'saints': 'new orleans',
+    'buccaneers': 'tampa bay', 'bucs': 'tampa bay',
+    'falcons': 'atlanta',
+    'panthers': 'carolina',
+    # MLB
+    'yankees': 'new york',
+    'red sox': 'boston',
+    'dodgers': 'los angeles',
+    'cubs': 'chicago',
+    'astros': 'houston',
+    'mets': 'new york',
+    'braves': 'atlanta',
+    'phill	es': 'philadelphia',
+    'nationals': 'washington',
+    'marlins': 'miami',
+    'brewers': 'milwaukee',
+    'reds': 'cincinnati',
+    'pirates': 'pittsburgh',
+    'cardinals': 'st. louis',
+    'padres': 'san diego',
+    'giants': 'san francisco',
+    'rockies': 'colorado',
+    'diamondbacks': 'arizona', 'd-backs': 'arizona',
+    'athletics': 'oakland', 'a\'s': 'oakland',
+    'mariners': 'seattle',
+    'angels': 'los angeles',
+    'rangers': 'texas',
+    'twins': 'minnesota',
+    'white sox': 'chicago',
+    'tigers': 'detroit',
+    'royals': 'kansas city',
+    'guardians': 'cleveland',
+    'orioles': 'baltimore',
+    'rays': 'tampa bay',
+    'blue jays': 'toronto',
+    # NHL
+    'bruins': 'boston',
+    'sabres': 'buffalo',
+    'canadiens': 'montreal', 'habs': 'montreal',
+    'senators': 'ottawa',
+    'maple leafs': 'toronto',
+    'thrashers': 'atlanta',
+    'hurricanes': 'carolina',
+    'panthers': 'florida',
+    'lightning': 'tampa bay',
+    'capitals': 'washington',
+    'blackhawks': 'chicago',
+    'red wings': 'detroit',
+    'predators': 'nashville',
+    'blues': 'st. louis',
+    'coyotes': 'arizona',
+    'avalanche': 'colorado',
+    'stars': 'dallas',
+    'wild': 'minnesota',
+    'jets': 'winnipeg',
+    'flames': 'calgary',
+    'oilers': 'edmonton',
+    'canucks': 'vancouver',
+    'ducks': 'anaheim',
+    'kings': 'los angeles',
+    'sharks': 'san jose',
+    'golden knights': 'vegas',
+    'kraken': 'seattle',
+}
+
+
+def expand_team_names(title: str) -> str:
+    """Replace nickname with city name so search matches Polymarket US format."""
+    result = title
+    for nickname, city in _TEAM_NAMES.items():
+        pattern = re.compile(r'\b' + re.escape(nickname) + r'\b', re.IGNORECASE)
+        if pattern.search(result):
+            result = pattern.sub(city, result)
+    return result
+
+
 # ── stop-words for keyword extraction ────────────────────
 _STOP = {
     'will', 'the', 'a', 'an', 'at', 'in', 'on', 'to', 'for', 'of', 'by',
@@ -169,13 +306,24 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
     if base_title != title:
         log.info(f"  🧹 Stripped to base title: '{base_title[:55]}'")
 
+    # Expand team nicknames to city names for Polymarket US matching
+    expanded_title = expand_team_names(base_title)
+    if expanded_title != base_title:
+        log.info(f"  🏙️  Expanded to city names: '{expanded_title[:60]}'")
+
     keywords = extract_keywords(title)
+    expanded_keywords = extract_keywords(expanded_title)
     log.info(f"  🔑 Keywords extracted: {keywords[:6]}")
 
     # Build a ranked list of search queries to try
     search_queries = []
 
-    # Best: top 2 proper nouns from the base title (usually team names)
+    # Best: expanded city names (e.g. "Oklahoma City San Antonio")
+    if len(expanded_keywords) >= 2:
+        search_queries.append(' '.join(expanded_keywords[:2]))
+    if len(expanded_keywords) >= 1:
+        search_queries.append(expanded_title[:60])
+    # Also try original nickname keywords
     if len(keywords) >= 2:
         search_queries.append(' '.join(keywords[:2]))
     # Also try top 3 keywords
@@ -216,7 +364,7 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
             for m in markets:
                 m_title = (m.get('title') or m.get('name') or
                            m.get('question') or m.get('slug', ''))
-                # Score against base_title (stripped) for better matching
+               # Score against base_title (stripped) for better matching
                 score = title_similarity(base_title, m_title)
                 log.debug(f"    [{query}] → '{m_title[:45]}' score={score:.2f}")
 
@@ -236,7 +384,7 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
         if best_score >= 0.60:
             break  # No need to try more queries
 
-    if best_slug and best_score >= THRESHOLD:
+    if best_slug and best_score >= THESHOLD:
         slug_cache[token_id] = best_slug
         log.info(f"  🔍 Matched US market: '{best_title[:50]}' → {best_slug} (score={best_score:.2f})")
         return best_slug
@@ -254,7 +402,7 @@ def map_intent(side: str, outcome: str) -> str:
     """
     Map international Polymarket side + outcome to Polymarket US order intent.
     BUY YES  → ORDER_INTENT_BUY_LONG   (buy YES shares)
-    BUY NO   → ORDER_INTENT_BUY_SHORT  (buy NO = short YES)
+    BUY NO   in ORDER_INTENT_BUY_SHORT  (buy NO = short YES)
     SELL YES → ORDER_INTENT_SELL_LONG  (sell/close YES position)
     SELL NO  → ORDER_INTENT_SELL_SHORT (sell NO shares)
     """
