@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Keep the default rule set but ignore the few stylistic checks that would
+# otherwise flag the bot's single-file, dense layout.
+ignore = [
+    "E401",  # multiple imports on one line (used intentionally at top of file)
+    "E402",  # module-level import not at top (tests adjust sys.path first)
+    "E741",  # ambiguous variable name
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

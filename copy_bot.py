@@ -384,7 +384,7 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
         if best_score >= 0.60:
             break  # No need to try more queries
 
-    if best_slug and best_score >= THESHOLD:
+    if best_slug and best_score >= THRESHOLD:
         slug_cache[token_id] = best_slug
         log.info(f"  🔍 Matched US market: '{best_title[:50]}' → {best_slug} (score={best_score:.2f})")
         return best_slug
@@ -548,7 +548,7 @@ def main():
     log.info(f"  Poll   : every {POLL_INTERVAL}s")
     log.info(f"  Mode   : {'🔴 DRY RUN (no real orders)' if DRY_RUN else '🟢 LIVE — REAL ORDERS ENABLED'}")
     log.info("────────────────────────────────────────────")
-    log.info(f"  Credentials:")
+    log.info("  Credentials:")
     log.info(f"    CLOB_API_KEY (key_id)   : {'✅ set' if CLOB_KEY_ID else '❌ NOT SET'}")
     log.info(f"    CLOB_SECRET (secret_key): {'✅ set' if CLOB_SECRET_KEY else '❌ NOT SET'}")
     log.info("════════════════════════════════════════════")
@@ -568,7 +568,7 @@ def main():
         # Verify connectivity by fetching account
         try:
             balances = client.account.balances()
-            log.info(f"✅ Connected to Polymarket US — account verified")
+            log.info("✅ Connected to Polymarket US — account verified")
             log.info(f"   Balances: {balances}")
         except Exception as e:
             log.error(f"❌ Auth check failed: {e}")
