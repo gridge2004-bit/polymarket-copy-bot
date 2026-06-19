@@ -9,7 +9,17 @@
 """
 
 import os, re, time, json, logging, urllib.request, urllib.error
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+# ── assistant layer (structured journal + surgical alerts) ──
+# Optional: the bot still trades if the assistant package is absent.
+try:
+    from assistant import journal
+    from assistant.alerts import should_copy
+    _ASSISTANT = True
+except Exception as _assistant_err:          # pragma: no cover
+    _ASSISTANT = False
 
 # ── load config ──────────────────────────────────────────
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
@@ -384,7 +394,7 @@ def get_market_slug(token_id: str, title: str, client) -> str | None:
         if best_score >= 0.60:
             break  # No need to try more queries
 
-    if best_slug and best_score >= THESHOLD:
+    if best_slug and best_score >= THRESHOLD:
         slug_cache[token_id] = best_slug
         log.info(f"  🔍 Matched US market: '{best_title[:50]}' → {best_slug} (score={best_score:.2f})")
         return best_slug
@@ -419,7 +429,13 @@ def map_intent(side: str, outcome: str) -> str:
         return 'ORDER_INTENT_SELL_SHORT'
 
 
-def execute_trade(trade: dict, bet_usdc: float, client=None):
+def _journal(status, **kw):
+    """Best-effort write to the structured journal (no-op without assistant)."""
+    if _ASSISTANT:
+        journal.record(status=status, **kw)
+
+
+def execute_trade(trade: dict, bet_usdc: float, client=None, their_size=None):
     """Mirror a trade on Polymarket US."""
     global total_trades, total_spent
 
@@ -429,23 +445,29 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
     title    = trade.get('title', '?')[:65]
     price    = float(trade.get('price', 0.5))
 
+    base = dict(title=title, token_id=token_id, side=side, outcome=outcome,
+                price=price, their_size_usdc=their_size, our_bet_usdc=bet_usdc)
+
     log.info(f"  {'[DRY RUN] ' if DRY_RUN else ''}→ {side} {outcome} @ {price:.3f} | ${bet_usdc} | {title}")
 
     if DRY_RUN:
         total_trades += 1
         total_spent  += bet_usdc
         log.info(f"  ✓ DRY RUN logged. Total: {total_trades} trades, ${total_spent:.2f} simulated")
+        _journal("dry_run", reason="simulated (DRY_RUN)", **base)
         return
 
     # ── LIVE EXECUTION ─────────────────────────────────────
     if not client:
         log.error("❌ No Polymarket US client — cannot execute")
+        _journal("error", reason="no client", **base)
         return
 
     # Find the US market slug using smart fuzzy matching
     slug = get_market_slug(token_id, title, client)
     if not slug:
         log.warning(f"  ✗ Skipping — no matching US market found for '{title[:40]}'")
+        _journal("skipped", reason="no US market match", **base)
         return
 
     # Calculate share quantity from USD amount
@@ -468,22 +490,40 @@ def execute_trade(trade: dict, bet_usdc: float, client=None):
 
         total_trades += 1
         total_spent  += bet_usdc
+        order_id = order.get('orderId', order.get('id', '?'))
         log.info(
             f"  ✅ ORDER PLACED — {slug} | {intent} | "
             f"qty={quantity} shares @ ${price:.3f} | ${bet_usdc} | "
-            f"id={order.get('orderId', order.get('id', '?'))}"
+            f"id={order_id}"
         )
+        _journal("placed", reason="order placed", slug=slug, intent=intent,
+                 order_id=str(order_id), **base)
 
     except NotFoundError:
         log.warning(f"  ✗ Market '{slug}' not found on Polymarket US (may differ by slug)")
         # Clear cache so a future trade on the same market can retry
         slug_cache.pop(token_id, None)
+        _journal("skipped", reason="slug not found on US", slug=slug, **base)
     except BadRequestError as e:
         log.error(f"  ✗ Bad order parameters: {e}")
+        _journal("error", reason=f"bad request: {e}", slug=slug, intent=intent, **base)
     except AuthenticationError as e:
         log.error(f"  ✗ Auth failed — check CLOB_API_KEY and CLOB_SECRET: {e}")
+        _journal("error", reason=f"auth failed: {e}", **base)
     except Exception as e:
         log.error(f"  ✗ Execution error: {e}")
+        _journal("error", reason=f"exec error: {e}", slug=slug, **base)
+
+
+def _todays_journal_rows():
+    """Journal rows since 00:00 UTC today — used for daily budget checks."""
+    if not _ASSISTANT:
+        return []
+    try:
+        midnight = datetime.now(timezone.utc).strftime('%Y-%m-%dT00:00:00')
+        return journal.load(since=midnight)
+    except Exception:
+        return []
 
 
 def poll(client=None):
@@ -521,7 +561,21 @@ def poll(client=None):
             log.warning("  ✗ Zero size trade — skipping")
             continue
 
-        execute_trade(t, bet, client)
+        # ── surgical alert filter (Phase 3) ──────────────────
+        if _ASSISTANT:
+            ok, reason = should_copy(t, their_size, bet, _todays_journal_rows())
+            if not ok:
+                log.info(f"  ⏭  Filtered out: {reason}")
+                _journal(
+                    "skipped", reason=reason,
+                    title=t.get('title', '?')[:65], token_id=t.get('asset'),
+                    side=t.get('side'), outcome=t.get('outcome'),
+                    price=t.get('price'), their_size_usdc=their_size,
+                    our_bet_usdc=bet,
+                )
+                continue
+
+        execute_trade(t, bet, client, their_size=their_size)
         time.sleep(0.3)
 
 

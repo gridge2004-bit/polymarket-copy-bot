@@ -1,0 +1,16 @@
+# Scheduled assistant routines (Phase 5). Times are UTC — adjust to your tz.
+# Install on a host/container with the repo + .env present:
+#     crontab routines/crontab
+# Or adapt these as Claude Code routines (https://code.claude.com/docs/en/routines).
+#
+# m h dom mon dow   command  (cwd assumed = repo root; edit REPO path below)
+
+# 12:30 UTC (~08:30 ET) — pre-session daily rundown
+30 12 * * 1-5  cd /app && python3 -m assistant.daily_rundown >> reports/cron.log 2>&1
+
+# 21:30 UTC (~16:30 ET) — nightly recap + daily trade grading
+30 21 * * 1-5  cd /app && python3 -m assistant.nightly_recap  >> reports/cron.log 2>&1
+35 21 * * 1-5  cd /app && python3 -m assistant.grade_trades   >> reports/cron.log 2>&1
+
+# Saturday 14:00 UTC — weekly autopsy
+0 14 * * 6     cd /app && python3 -m assistant.weekly_autopsy >> reports/cron.log 2>&1

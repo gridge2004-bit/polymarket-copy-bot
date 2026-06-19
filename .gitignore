@@ -1,0 +1,15 @@
+# Secrets & local config
+.env
+*.env
+
+# Runtime data (the journal is machine-local state, not source)
+bot.log
+journal/
+reports/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
