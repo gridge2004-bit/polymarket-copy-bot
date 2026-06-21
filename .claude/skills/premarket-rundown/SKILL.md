@@ -1,39 +1,53 @@
 ---
 name: premarket-rundown
-description: Build a prioritized pre-session trading briefing (the SMB "Daily Market Rundown"). Use when the user asks for a morning rundown, pre-market game plan, watchlist prioritization, "what should I watch today", or pastes overnight headlines / pre-market data and wants it turned into a ranked watchlist. Turns raw inputs into one prioritized table in minutes instead of an hour.
+description: Build a prioritized pre-session macro briefing for an index-futures trader (NQ/MNQ), modeled on the SMB "Daily Market Rundown". Use when the user asks for a morning rundown, pre-market game plan, "what should I watch today", a week-ahead, or pastes overnight data and wants it turned into a ranked plan. Covers overnight sessions, the economic calendar, sector/crypto risk tone, and key NQ levels — prioritization, not predictions.
 ---
 
-# Pre-Market Rundown
+# Pre-Market Rundown — Futures (NQ/MNQ)
 
-Replicates SMB Capital's pre-market automation (Jeff Holden, practice #2; "I
-Automated My Pre-Market Research With AI"). Goal: process overnight info into a
-single prioritized briefing **before the open** — not predictions, prioritization.
+Replicates SMB Capital's pre-market automation (Jeff Holden, practice #2) tuned
+for an index-futures day trader who watches the whole tape. Goal: turn overnight
+information into one prioritized briefing **before the cash open** — the morning
+macro read that sets the day's bias and levels.
 
-## Inputs to ask for (only if missing)
-- Overnight/pre-market headlines, gainers/losers, gap scanners, earnings.
-- The user's traded markets/tickers and time zone.
-- Their setups (default: ORB, VWAP reclaim, momentum continuation).
-- If a `rules/strategy.md` exists in the repo, read it and respect its filters.
+## Inputs (pull what's provided; fetch/ask for the rest)
+- **Overnight action:** ES/NQ globex range, Asia + Europe session behavior, gap.
+- **Economic calendar (highest priority for futures):** today's releases with
+  times in ET — CPI/PPI, FOMC/Fed speakers, jobs (NFP/claims), PMIs, GDP, plus
+  any 8:30/10:00 prints. Flag the session-defining event and its time.
+- **Risk tone:** DXY, US10Y yields, oil/gold, **crypto (BTC/ETH) as 24h risk
+  proxy**, VIX.
+- **Sector rotation / leadership:** which sectors and mega-caps (NVDA, AAPL,
+  MSFT, etc.) are leading or lagging pre-market; anything moving the NQ weights.
+- **Catalysts:** overnight headlines, notable earnings (esp. mega-cap after/before).
+- Read `rules/futures_strategy.md` (your plan) and respect its session windows,
+  bias inputs, and no-trade rules (e.g. "no new trades before red-folder news").
 
 ## Process
-1. Parse every name out of the pasted data.
-2. For each, capture: **catalyst/news driver**, **pre-market action** (gap %,
-   relative volume, strength/weakness), **key levels** (support/resistance,
-   prior day H/L, premarket H/L), and **setup potential** (which pattern could
-   trigger).
-3. Score priority **High / Medium / Low** by catalyst strength × clean technical
-   level × liquidity. Be skeptical; most names are Low.
+1. Establish the **day's bias**: risk-on / risk-off / two-sided, with the
+   evidence (overnight trend, yields, crypto, breadth).
+2. Mark **NQ key levels**: overnight high/low, prior day H/L and value area,
+   globex VWAP, the obvious round numbers / prior swing levels.
+3. Build the **event timeline** for the session so the trader knows when to size
+   down around news.
+4. Prioritize **High / Medium / Low** what actually matters today.
 
 ## Output (always this shape)
-A markdown table, one row per name, **sorted High first**:
+1. **Bias:** one line — direction lean + conviction + the "this invalidates it" level.
+2. **NQ levels to trade against:** a short list (support / resistance / pivot).
+3. **Event timeline (ET):** table of today's releases by time + expected impact.
 
-| Ticker | Priority | Catalyst | Pre-mkt action | Key levels | Setup to watch |
-|---|---|---|---|---|---|
+| Time (ET) | Event | Why it matters | Trade plan around it |
+|---|---|---|---|
 
-Then **2–3 sentences** of overall market context (tone, index posture, the one
-theme of the day). Then a one-line **"If I only watch 3"** shortlist.
+4. **Cross-market tone:** 2–3 sentences — yields, DXY, crypto, sector leadership.
+5. **"If I only watch 3 things today":** the three highest-priority items.
+
+If markets are closed (weekend/holiday), produce a **Week-Ahead** version: the
+week's red-folder events by day + levels that matter into the next session.
 
 ## Rules
-- Never give a buy/sell call or price target. You prioritize; the trader decides.
-- If data is thin, say so and mark names Low rather than inventing catalysts.
-- Keep it skimmable — a trader reads this in under 60 seconds before the bell.
+- Prioritization and levels, never a price prediction or a buy/sell call.
+- Always surface the **next major economic release and its time** — for NQ that
+  single fact reshapes the whole session.
+- Keep it to a 60-second read before the bell.

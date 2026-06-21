@@ -24,8 +24,9 @@ pick trades; it can make you decide better and enforce your own rules.
    trader's style, setups, and rules.
 2. **Trade journal** — structured log of every decision + reasoning.
 3. **Daily routine** — pre-market prep, mid-session alerts, post-trade review.
-4. **Custom instructions / rules** — the written `rules/strategy.md` everything
-   is graded against.
+4. **Custom instructions / rules** — the written rules everything is graded
+   against. For futures day-trading (NQ/MNQ + options) that's
+   `rules/futures_strategy.md`; the copy bot uses `rules/strategy.md`.
 
 ## Route to the right skill
 - Morning prep / watchlist → **premarket-rundown**

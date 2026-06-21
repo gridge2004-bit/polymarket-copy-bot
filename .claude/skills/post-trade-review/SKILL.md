@@ -11,7 +11,8 @@ followed or whether emotion drove the decision.
 
 ## Inputs to ask for (only if missing)
 - The setup/plan as stated **before** the trade (entry trigger, stop, target,
-  size, thesis). If `rules/strategy.md` exists, read it as the standard.
+  size, thesis). Read `rules/futures_strategy.md` as the standard to grade
+  against (fall back to `rules/strategy.md`).
 - What actually happened: entry, exit, size, and a chart screenshot if available.
 - How the trader felt during it (optional but valuable).
 

@@ -11,7 +11,8 @@ for **the single most important trend to work on** — the one fix that compound
 ## Inputs to ask for (only if missing)
 - The week's trades: a pasted list, a journal file, report cards, or
   `journal/trades.jsonl` from this repo (read it if present).
-- The written rules (`rules/strategy.md`) to grade against, if available.
+- The written rules (`rules/futures_strategy.md`, fall back `rules/strategy.md`)
+  to grade against.
 
 ## Process
 1. Aggregate the week: count by setup, win rate, average win vs. average loss,
